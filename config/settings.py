@@ -194,7 +194,7 @@ class OutputSettings:
     
     # Currency section order for outbound sheet
     outbound_currency_order: List[str] = field(default_factory=lambda: [
-        'MYR', 'USD', 'IDR', 'PHP', 'SGD', 'EUR'
+        'MYR', 'USD', 'IDR', 'PHP', 'HKD', 'VND', 'SGD', 'EUR', 'THB'
     ])
 
 
