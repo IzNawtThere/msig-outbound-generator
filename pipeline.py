@@ -342,19 +342,27 @@ class ProcessingPipeline:
             total_items=total_files
         )
         
+        logger.info(f"Starting outbound processing: {len(awb_files)} AWBs, {len(invoice_files)} Invoices")
+        
         # Process AWBs
         awb_extractions = {}
         matched_awbs = set()  # Track which AWBs have been matched to invoices
         
         for awb_info in awb_files:
             progress.current_item = awb_info['name']
+            logger.info(f"Processing AWB: {awb_info['name']}")
             
             try:
                 base64_img = self.pdf_processor.page_to_base64(awb_info['path'], 0)
                 result = extractor.extract_from_image(base64_img, "outbound_awb")
                 awb_extractions[awb_info['name']] = result
                 
+                # Log extraction results
+                logger.info(f"  AWB Result: flight={result.flight_numbers}, date={result.ship_date}, "
+                           f"dest={result.destination_country}, confidence={result.confidence}")
+                
             except Exception as e:
+                logger.error(f"AWB extraction failed for {awb_info['name']}: {e}")
                 progress.errors.append(f"AWB extraction failed for {awb_info['name']}: {e}")
             
             progress.items_processed += 1
@@ -364,23 +372,40 @@ class ProcessingPipeline:
         # Process Invoices and match with AWBs
         for inv_info in invoice_files:
             progress.current_item = inv_info['name']
+            logger.info(f"Processing Invoice: {inv_info['name']}")
             
             try:
                 base64_img = self.pdf_processor.page_to_base64(inv_info['path'], 0)
                 inv_result = extractor.extract_from_image(base64_img, "outbound_invoice")
+                
+                # Log invoice extraction results
+                logger.info(f"  Invoice Result: num={inv_result.tracking_or_awb}, currency={inv_result.currency}, "
+                           f"value={inv_result.total_value}, dest={inv_result.destination_country}, "
+                           f"confidence={inv_result.confidence}")
                 
                 # Find matching AWB
                 itr_num = extract_itr_number(inv_info['name'])
                 matching_awb = None
                 matching_awb_name = None
                 
+                logger.info(f"  Looking for AWB match with key: '{itr_num}'")
+                
                 if itr_num:
                     for awb_name, awb_result in awb_extractions.items():
-                        if itr_num.replace(' ', '').lower() in awb_name.replace(' ', '').lower():
+                        # Normalize both for comparison
+                        itr_normalized = itr_num.replace(' ', '').lower()
+                        awb_normalized = awb_name.replace(' ', '').lower()
+                        
+                        if itr_normalized in awb_normalized:
                             matching_awb = awb_result
                             matching_awb_name = awb_name
                             matched_awbs.add(awb_name)
+                            logger.info(f"  MATCHED with AWB: {awb_name}")
                             break
+                    
+                    if not matching_awb:
+                        logger.warning(f"  NO AWB MATCH found for {itr_num}")
+                        progress.warnings.append(f"No AWB match found for invoice {inv_info['name']}")
                 
                 # Create outbound shipment
                 shipment = self._create_outbound_shipment(
@@ -390,7 +415,11 @@ class ProcessingPipeline:
                 )
                 self.outbound_shipments.append(shipment)
                 
+                logger.info(f"  Created shipment: {shipment.invoice_number}, value={shipment.value}, "
+                           f"currency={shipment.currency}, flight={shipment.flight_vehicle}")
+                
             except Exception as e:
+                logger.error(f"Invoice extraction failed for {inv_info['name']}: {e}")
                 progress.errors.append(f"Invoice extraction failed for {inv_info['name']}: {e}")
             
             progress.items_processed += 1
@@ -398,8 +427,11 @@ class ProcessingPipeline:
                 progress_callback(progress)
         
         # Create shipments for AWBs without matching invoices
+        logger.info(f"Checking for unmatched AWBs. Matched: {len(matched_awbs)}, Total: {len(awb_extractions)}")
+        
         for awb_name, awb_result in awb_extractions.items():
             if awb_name not in matched_awbs:
+                logger.warning(f"Unmatched AWB: {awb_name} - creating shipment without invoice data")
                 # AWB without invoice - create shipment from AWB only
                 shipment = self._create_outbound_shipment(
                     awb_name,
@@ -408,6 +440,8 @@ class ProcessingPipeline:
                 )
                 self.outbound_shipments.append(shipment)
                 progress.warnings.append(f"AWB {awb_name} processed without matching invoice")
+        
+        logger.info(f"Outbound processing complete: {len(self.outbound_shipments)} shipments created")
         
         return self.outbound_shipments
     

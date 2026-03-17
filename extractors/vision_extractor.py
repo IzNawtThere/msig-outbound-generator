@@ -370,16 +370,14 @@ class VisionExtractor:
         """
         Parse outbound AWB extraction response.
         
-        AWB responses use different field names:
-        - awb_number -> tracking_or_awb
-        - flight_number (or flight_info) -> flight_numbers
-        - flight_date -> ship_date
-        - destination -> destination_country
-        - description -> stored in notes (VERBATIM for classification)
-        - currency -> currency field
+        Enhanced for new prompt format with:
+        - destination_city + destination_country (separate fields)
+        - hawb_number support
+        - invoice_reference extraction
+        - Better flight number parsing
         """
-        # Parse AWB number
-        awb_number = data.get('awb_number')
+        # Parse AWB number (prefer HAWB if available)
+        awb_number = data.get('hawb_number') or data.get('awb_number')
         if awb_number:
             awb_number = normalize_awb_number(awb_number)
         
@@ -392,29 +390,49 @@ class VisionExtractor:
             flight_matches = re.findall(r'[A-Z]{2}\d{3,4}', str(flight_number).upper())
             if flight_matches:
                 flight_numbers = flight_matches
-            elif flight_number and flight_number.strip():
+            elif flight_number and str(flight_number).strip():
                 # Use as-is if no pattern match but has content
-                flight_numbers = [flight_number.strip()]
+                flight_numbers = [str(flight_number).strip()]
         
         # Parse flight date (from "Executed on" field primarily)
         date_str = data.get('flight_date')
         ship_date = parse_date_flexible(date_str) if date_str else None
         
-        # Parse destination
-        destination = data.get('destination')
+        # Parse destination - handle both combined and separate fields
+        destination_city = data.get('destination_city')
+        destination_country = data.get('destination_country')
+        destination = data.get('destination')  # Legacy field
+        
+        # Build destination string
+        if destination_city and destination_country:
+            destination = f"{destination_city}, {destination_country}"
+        elif destination_country:
+            destination = destination_country
+        elif destination_city:
+            destination = destination_city
+        # else: keep legacy destination value
         
         # Get description VERBATIM for classification
         description = data.get('description', '')
         
-        # Build notes with description if available
+        # Build comprehensive notes
         notes_parts = []
-        if data.get('notes'):
+        if data.get('extraction_notes'):
+            notes_parts.append(data.get('extraction_notes'))
+        if data.get('notes'):  # Legacy field
             notes_parts.append(data.get('notes'))
         if description:
-            # Store description exactly as extracted for multi-label classification
             notes_parts.append(f"Description: {description}")
         if data.get('invoice_reference'):
             notes_parts.append(f"Invoice: {data.get('invoice_reference')}")
+        if data.get('consignee'):
+            notes_parts.append(f"Consignee: {data.get('consignee')}")
+        if data.get('pieces'):
+            notes_parts.append(f"Pieces: {data.get('pieces')}")
+        if data.get('gross_weight_kg'):
+            notes_parts.append(f"Weight: {data.get('gross_weight_kg')}kg")
+        
+        logger.debug(f"AWB Extraction - Flight: {flight_numbers}, Date: {ship_date}, Dest: {destination}")
         
         return ExtractionResult(
             document_type=DocumentType.AIR_WAYBILL,
@@ -439,26 +457,32 @@ class VisionExtractor:
         """
         Parse outbound invoice extraction response.
         
-        Invoice responses include:
-        - invoice_number
-        - date
-        - currency, total_value
-        - destination_city, destination_country
-        - description
+        Enhanced for new prompt format with:
+        - Better total_value parsing (handles large IDR/PHP values)
+        - consignee_name extraction
+        - incoterms support
+        - po_numbers tracking
         """
         # Parse date
         date_str = data.get('date')
         ship_date = parse_date_flexible(date_str) if date_str else None
         
-        # Parse value
+        # Parse value - CRITICAL: handle large numbers correctly
         total_value = data.get('total_value')
-        if isinstance(total_value, str):
-            # Remove any currency symbols or commas
-            total_value = re.sub(r'[^\d.]', '', total_value)
-            try:
+        if total_value is not None:
+            if isinstance(total_value, str):
+                # Remove any currency symbols, commas, spaces
+                cleaned = re.sub(r'[^\d.]', '', total_value)
+                try:
+                    total_value = float(cleaned)
+                except ValueError:
+                    logger.warning(f"Could not parse total_value: {total_value}")
+                    total_value = None
+            elif isinstance(total_value, (int, float)):
                 total_value = float(total_value)
-            except ValueError:
-                total_value = None
+        
+        # Log the extracted value for debugging
+        logger.debug(f"Invoice Extraction - Value: {total_value}, Currency: {data.get('currency')}")
         
         # Build destination string
         dest_city = data.get('destination_city')
@@ -471,6 +495,22 @@ class VisionExtractor:
         elif dest_city:
             destination = dest_city
         
+        # Build comprehensive notes
+        notes_parts = []
+        if data.get('extraction_notes'):
+            notes_parts.append(data.get('extraction_notes'))
+        if data.get('notes'):  # Legacy field
+            notes_parts.append(data.get('notes'))
+        if data.get('description'):
+            notes_parts.append(f"Description: {data.get('description')}")
+        if data.get('consignee_name'):
+            notes_parts.append(f"Consignee: {data.get('consignee_name')}")
+        if data.get('po_numbers'):
+            notes_parts.append(f"PO: {data.get('po_numbers')}")
+        
+        # Get incoterms
+        incoterms = data.get('incoterms')
+        
         return ExtractionResult(
             document_type=DocumentType.COMMERCIAL_INVOICE,
             confidence=confidence,
@@ -481,9 +521,10 @@ class VisionExtractor:
             destination_country=destination,
             currency=data.get('currency'),
             total_value=total_value,
+            incoterms=incoterms,
             page_number=page_number,
             raw_response=raw_response,
-            notes=data.get('notes', '') + f" | Description: {data.get('description', 'N/A')}",
+            notes=" | ".join(notes_parts) if notes_parts else "",
             extraction_errors=errors
         )
 

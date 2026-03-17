@@ -100,11 +100,11 @@ class TransportModeConfig:
 class APISettings:
     """Claude API configuration"""
     api_key: str = ""  # User-entered for now, can be env var later
-    model: str = "claude-sonnet-4-20250514"
-    delay_seconds: int = 10  # Critical: Prevents rate limiting
+    model: str = "claude-sonnet-4-5-20250514"  # Latest Sonnet for best OCR
+    delay_seconds: int = 8  # Slightly faster but still safe
     max_retries: int = 3
-    timeout_seconds: int = 60
-    max_tokens: int = 2000
+    timeout_seconds: int = 90  # Increased for complex documents
+    max_tokens: int = 4000  # Increased for detailed extraction
 
 
 @dataclass  
